@@ -20,6 +20,8 @@ cmake-build-*/
 # VS Code (personal settings only)
 .vscode/settings.json
 .vscode/extensions.json
+!.vscode/tasks.json
+!.vscode/launch.json
 
 # OS
 .DS_Store

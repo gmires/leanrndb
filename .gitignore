@@ -12,10 +12,14 @@ cmake-build-*/
 *.swo
 *~
 
-# Runtime (database files)
+# Runtime (database files + history)
 *.db
 *.db-journal
 .leanrndb_history
+
+# VS Code (personal settings only)
+.vscode/settings.json
+.vscode/extensions.json
 
 # OS
 .DS_Store

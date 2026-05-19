@@ -2,10 +2,12 @@
 #include <string>
 #include <sstream>
 #include <iomanip>
+#include <cstring>
 #include "database.h"
 #include "tokenizer.h"
 #include "parser.h"
 #include "executor.h"
+#include "linenoise.h"
 
 /**
  * Stampa un risultato di query in formato tabellare (per SELECT)
@@ -50,71 +52,69 @@ static void print_result(const QueryResult& r) {
 }
 
 /**
- * REPL interattivo: legge SQL da stdin riga per riga,
- * accumula fino al punto e virgola, poi tokenizza, analizza ed esegue.
+ * REPL interattivo con linenoise: history, frecce, editing.
+ * Accumula righe fino al punto e virgola, poi esegue.
  */
 static void run_repl(Database& db) {
-    std::cout << "leanrndb v0.1.0 — type SQL statements or EXIT\n";
-    std::cout << "> " << std::flush;
+    linenoiseHistorySetMaxLen(100);
+    linenoiseHistoryLoad(".leanrndb_history");
 
-    std::string line;
+    std::cout << "leanrndb v0.1.0 — type SQL or EXIT\n";
+
     std::string buffer;
 
-    while (std::getline(std::cin, line)) {
-        // Controlla se l'utente vuole uscire (EXIT, QUIT, .exit, .quit)
+    while (true) {
+        const char* prompt = buffer.empty() ? "> " : "... ";
+        char* raw = linenoise(prompt);
+        if (raw == nullptr) // EOF (Ctrl+D) o errore
+            break;
+
+        std::string line(raw);
+        linenoiseFree(raw);
+        if (line.empty()) continue;
+
+        // Controlla exit
         std::string trimmed;
         for (char c : line) {
-            if (c != ' ' && c != '\t' && c != ';') trimmed += (char)std::toupper(c);
+            if (c != ' ' && c != '\t' && c != ';')
+                trimmed += (char)std::toupper(c);
         }
-        if (trimmed == "EXIT" || trimmed == "QUIT" || trimmed == ".EXIT" || trimmed == ".QUIT")
+        if (trimmed == "EXIT" || trimmed == "QUIT" ||
+            trimmed == ".EXIT" || trimmed == ".QUIT")
             break;
 
         buffer += line + " ";
 
-        // Il comando è completo solo quando troviamo un punto e virgola
-        bool has_semicolon = false;
-        for (char c : line) {
-            if (c == ';') { has_semicolon = true; break; }
-        }
-
-        if (!has_semicolon) {
-            std::cout << "> " << std::flush; // prosegue su più righe
+        // Completo solo se c'è un punto e virgola nella riga corrente
+        if (line.find(';') == std::string::npos)
             continue;
-        }
+
+        // Aggiunge all'history (solo comandi completi, non vuoti)
+        linenoiseHistoryAdd(buffer.c_str());
+        linenoiseHistorySave(".leanrndb_history");
 
         try {
             Tokenizer tok(buffer);
             tok.tokenize_all();
             auto toks = tok.tokens();
 
-            if (toks.empty() || toks[0].type == TokenType::END) {
-                buffer.clear();
-                std::cout << "> " << std::flush;
-                continue;
-            }
-
             while (!toks.empty() &&
                    (toks.back().type == TokenType::END ||
                     toks.back().type == TokenType::ERROR))
                 toks.pop_back();
 
-            if (toks.empty()) {
-                buffer.clear();
-                std::cout << "> " << std::flush;
-                continue;
+            if (!toks.empty()) {
+                Parser parser(toks);
+                Statement stmt = parser.parse();
+                Executor exec(&db);
+                QueryResult result = exec.execute(stmt);
+                print_result(result);
             }
-
-            Parser parser(toks);
-            Statement stmt = parser.parse();
-            Executor exec(&db);
-            QueryResult result = exec.execute(stmt);
-            print_result(result);
         } catch (std::exception& e) {
             std::cout << "Error: " << e.what() << "\n";
         }
 
         buffer.clear();
-        std::cout << "> " << std::flush;
     }
     std::cout << "Bye.\n";
 }

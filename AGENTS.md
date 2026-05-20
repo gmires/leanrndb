@@ -27,6 +27,24 @@ cmake -B build && cmake --build build   # build leanrndb + test_basic
 - **`src/row.h`** — `Value` (int/string/null) + Row serialization (little-endian, self-describing)
 - **`src/main.cpp`** — REPL loop, line-buffered until `;`, one-shot with third argv
 
+## Overflow pages
+
+Values too large to fit inline in a 4 KB B-tree page are automatically stored
+in a chain of **overflow pages**. This removes the previous ~4 KB row size limit.
+
+- **Sentinel**: `0xFFFFFFFF` in the `value_len` field indicates overflow.
+- **Overflow cell**: `[2 key_len][key][4 sentinel][4 total_size][4 first_page]`.
+- **Overflow page format**: `[4 next_page][4 data_len][4088 data]`.
+- **Transparent**: the B-tree `insert`, `find`, `remove`, `scan_all`, and `Cursor`
+  APIs handle overflow internally; callers (Database/Executor) see no difference.
+- **Binary search optimized**: `read_leaf_key()` avoids reading overflow values
+  during `find_key_in_node()`.
+- **No `free_page()` on Pager**: overflow pages from `remove()` or splits are
+  leaked (allocated but orphaned). Acceptable for a learning project.
+- **Threshold**: a value is stored inline if and only if
+  `2 + key.size() + 4 + value.size() <= PAGE_SIZE - HDR_LEAF - 2` (~4075 bytes
+  for an 8-byte key). Larger values use overflow automatically.
+
 ## SQL supported
 
 ```

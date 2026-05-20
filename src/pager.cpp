@@ -32,8 +32,12 @@ Pager::~Pager() { flush_all(); }
 
 // Restituisce un puntatore al buffer della pagina.
 // Se la pagina non era ancora stata caricata, la crea vuota.
+// NOTA: la pagina viene marcata sporca automaticamente, perché non c'è
+// modo di distinguere lettura da scrittura a livello di Pager.
+// Pagine lette ma non modificate verranno riscritte inutilmente (accettabile).
 uint8_t* Pager::get_page(uint32_t page_num) {
     ensure_page(page_num);
+    dirty_[page_num] = true;
     return pages_[page_num].data();
 }
 

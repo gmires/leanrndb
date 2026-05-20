@@ -365,8 +365,8 @@ bool Database::select(const std::string& table_name,
                 results.push_back(std::move(row));
             }
         }
-        return true;
-    }
+    return true;
+}
 
     // Scansione completa (full scan) con filtro
     bt->scan_all([&](const std::vector<uint8_t>& k,
@@ -467,4 +467,71 @@ bool Database::update_rows(const std::string& table_name,
         affected++;
     }
     return true;
+}
+
+// ── introspection ───────────────────────────────────────────────
+
+std::vector<std::string> Database::table_names() const {
+    std::vector<std::string> names;
+    for (auto& [name, _] : tables_)
+        names.push_back(name);
+    return names;
+}
+
+std::string Database::describe_table(const std::string& name) const {
+    auto it = tables_.find(name);
+    if (it == tables_.end())
+        return "Table not found: " + name;
+
+    auto& t = it->second;
+    std::ostringstream out;
+    out << "      table: " << t.name << "\n";
+    out << "  root page: " << t.root_page << "\n";
+    out << "  next rowid: " << t.next_rowid << "\n";
+    out << "    columns:\n";
+    for (auto& col : t.columns)
+        out << "    " << col.name << "  " << col.type << "\n";
+    if (!t.indexes.empty()) {
+        out << "    indexes:\n";
+        for (auto& [idx_name, idx_info] : t.indexes)
+            out << "      " << idx_name << " ON " << idx_info.first
+                << " (root:" << idx_info.second << ")\n";
+    }
+    return out.str();
+}
+
+std::string Database::table_schema(const std::string& name) const {
+    auto it = tables_.find(name);
+    if (it == tables_.end())
+        return "Table not found: " + name;
+
+    auto& t = it->second;
+    std::ostringstream out;
+    out << "CREATE TABLE " << t.name << " (";
+    for (size_t i = 0; i < t.columns.size(); i++) {
+        if (i > 0) out << ", ";
+        out << t.columns[i].name << " " << t.columns[i].type;
+    }
+    out << ");\n";
+    for (auto& [idx_name, idx_info] : t.indexes)
+        out << "CREATE INDEX " << idx_name << " ON " << t.name
+            << " (" << idx_info.first << ");\n";
+    return out.str();
+}
+
+std::string Database::db_summary() const {
+    std::ostringstream out;
+    out << "      tables: " << tables_.size() << "\n";
+    out << "       pages: " << pager_.num_pages() << "\n";
+    out << "   page size: " << Pager::PAGE_SIZE << "\n";
+    return out.str();
+}
+
+std::vector<std::string> Database::all_index_names() const {
+    std::vector<std::string> result;
+    for (auto& [tname, table] : tables_) {
+        for (auto& [idx_name, _] : table.indexes)
+            result.push_back(tname + "." + idx_name);
+    }
+    return result;
 }

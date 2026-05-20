@@ -312,6 +312,37 @@ Si può anche usare in modalità **one-shot**:
 $ ./build/leanrndb mio.db "SELECT * FROM persone;"
 ```
 
+### Dot-command utility
+
+Oltre al SQL, il REPL accetta comandi che iniziano con `.` (stile SQLite):
+
+| Comando | Effetto |
+|---|---|
+| `.tables` | Elenca tutte le tabelle |
+| `.schema [table]` | Mostra il `CREATE TABLE`/`CREATE INDEX` |
+| `.describe <table>` | Colonne, tipi, rowid, indici nel dettaglio |
+| `.head <table> [N]` | Prime N righe (default 10) |
+| `.count <table>` | Conteggio righe |
+| `.indices [table]` | Elenca gli indici |
+| `.dbinfo` | Statistiche database (# tabelle, # pagine) |
+| `.help` | Lista completa dei comandi |
+| `.exit` / `.quit` | Esce dal REPL |
+
+```sh
+> CREATE TABLE t (id INT, val VARCHAR);
+CREATE TABLE
+> .tables
+t
+> .describe t
+      table: t
+  root page: 1
+  next rowid: 1
+    columns:
+    id  INT
+    val  VARCHAR
+> .exit
+```
+
 ---
 
 ## Limiti e semplificazioni

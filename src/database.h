@@ -74,6 +74,13 @@ public:
 
     Pager* pager() { return &pager_; }
 
+    // Introspection / utility
+    std::vector<std::string> table_names() const;
+    std::string describe_table(const std::string& name) const;
+    std::string table_schema(const std::string& name) const;
+    std::string db_summary() const;
+    std::vector<std::string> all_index_names() const;
+
 private:
     // Salva/carica il catalogo su/da pagina 0
     void save_catalog();

@@ -30,6 +30,22 @@ static void w32(uint8_t* p, uint32_t v) {
 static constexpr size_t HDR_LEAF = 5;
 static constexpr size_t HDR_INT  = 9;
 
+// ── overflow pages ─────────────────────────────────────────────
+// Quando il valore di una cella è troppo grande per stare inline nella pagina,
+// si scrive un cella speciale con value_len = OVERFLOW_SENTINEL,
+// seguita da total_size (4B) e first_overflow_page (4B).
+// I dati vero vengono messi in una catena di pagine overflow.
+static constexpr uint32_t OVERFLOW_SENTINEL = 0xFFFFFFFF;
+// Quanti byte di dati utente entrano in una pagina overflow (4 KB - 8 byte di overhead)
+static constexpr size_t OVERFLOW_PAGE_DATA = Pager::PAGE_SIZE - 8;
+
+// Una cella inline non può mai superare lo spazio disponibile in una pagina
+// foglia appena inizializzata: PAGE_SIZE - HDR_LEAF - 2 (per il primo cell ptr)
+static inline bool is_overflow(const std::vector<uint8_t>& key,
+                               const std::vector<uint8_t>& value) {
+    return (2 + key.size() + 4 + value.size()) > (Pager::PAGE_SIZE - HDR_LEAF - 2);
+}
+
 // ── PageHdr: lettura/scrittura dell'intestazione di pagina ──────
 
 BTree::PageHdr BTree::read_hdr(const uint8_t* page) {
@@ -74,8 +90,12 @@ void BTree::set_cell_offset(uint8_t* page, uint16_t idx, uint16_t off) {
 // ── dimensioni celle ────────────────────────────────────────────
 
 // Cella foglia: [2 key_len][key][4 value_len][value]
+// Se il valore è troppo grande, usa il formato overflow:
+//   [2 key_len][key][4 sentinel][4 total_size][4 first_overflow_page]
 size_t BTree::leaf_cell_size(const std::vector<uint8_t>& key,
                              const std::vector<uint8_t>& value) {
+    if (is_overflow(key, value))
+        return 2 + key.size() + 12; // sentinel + total_size + first_page
     return 2 + key.size() + 4 + value.size();
 }
 
@@ -98,16 +118,33 @@ size_t BTree::free_space(const uint8_t* page) {
 
 // ── lettura celle ───────────────────────────────────────────────
 
+// Legge SOLO la chiave da una cella foglia (utile per binary search,
+// evita di leggere il valore, specialmente se su pagine overflow).
+void BTree::read_leaf_key(const uint8_t* page, uint16_t idx,
+                          std::vector<uint8_t>& key) {
+    uint16_t off = cell_offset(page, idx);
+    uint16_t ks  = r16(page + off);
+    key.assign(page + off + 2, page + off + 2 + ks);
+}
+
 // Legge una cella foglia data la posizione idx: estrae chiave e valore.
+// Se la cella usa overflow, ricostruisce il valore dalle pagine overflow.
 void BTree::read_leaf_cell(const uint8_t* page, uint16_t idx,
                            std::vector<uint8_t>& key,
                            std::vector<uint8_t>& value) {
     uint16_t off = cell_offset(page, idx);
     uint16_t ks  = r16(page + off);   // key size
     key.assign(page + off + 2, page + off + 2 + ks);
-    uint32_t vs  = r32(page + off + 2 + ks); // value size
-    value.assign(page + off + 2 + ks + 4,
-                 page + off + 2 + ks + 4 + vs);
+    uint32_t vs  = r32(page + off + 2 + ks); // value size o sentinel
+
+    if (vs == OVERFLOW_SENTINEL) {
+        uint32_t total_size = r32(page + off + 2 + ks + 4);
+        uint32_t first_page = r32(page + off + 2 + ks + 8);
+        read_overflow_pages(first_page, total_size, value);
+    } else {
+        value.assign(page + off + 2 + ks + 4,
+                     page + off + 2 + ks + 4 + vs);
+    }
 }
 
 // Legge una cella interna: estrae chiave e pagina del figlio.
@@ -146,8 +183,7 @@ int BTree::find_key_in_node(const uint8_t* page,
         int mid = (lo + hi) / 2;
         std::vector<uint8_t> k;
         if (h.is_leaf) {
-            std::vector<uint8_t> v;
-            read_leaf_cell(page, mid, k, v);
+            read_leaf_key(page, mid, k);
         } else {
             uint32_t cp;
             read_int_cell(page, mid, k, cp);
@@ -164,6 +200,7 @@ int BTree::find_key_in_node(const uint8_t* page,
 
 // Inserisce una cella in un nodo foglia: scrive i dati in fondo
 // all'area celle e aggiorna l'array degli offset.
+// Se il valore è troppo grande, usa il formato overflow.
 void BTree::insert_into_leaf(uint8_t* page,
                              const std::vector<uint8_t>& key,
                              const std::vector<uint8_t>& value) {
@@ -180,9 +217,21 @@ void BTree::insert_into_leaf(uint8_t* page,
     pos += 2;
     memcpy(page + pos, key.data(), key.size());
     pos += key.size();
-    w32(page + pos, (uint32_t)value.size());
-    pos += 4;
-    memcpy(page + pos, value.data(), value.size());
+
+    if (is_overflow(key, value)) {
+        // Formato overflow: sentinel + total_size + first_overflow_page
+        w32(page + pos, OVERFLOW_SENTINEL);
+        pos += 4;
+        w32(page + pos, (uint32_t)value.size());
+        pos += 4;
+        uint32_t first_page = write_overflow_pages(value);
+        w32(page + pos, first_page);
+    } else {
+        // Formato inline: value_len + value_data
+        w32(page + pos, (uint32_t)value.size());
+        pos += 4;
+        memcpy(page + pos, value.data(), value.size());
+    }
 
     // Trova lo slot giusto e sposta gli offset esistenti per fare spazio
     int slot = find_key_in_node(page, key);
@@ -222,6 +271,73 @@ void BTree::insert_into_internal(uint8_t* page,
     h.num_cells++;
     h.cell_area_end = new_end;
     write_hdr(page, h);
+}
+
+// ── overflow pages ─────────────────────────────────────────────
+
+// Scrive un valore su una catena di pagine overflow.
+// Formato pagina: [4 next_page][4 data_len][4088 dati].
+// Restituisce il numero della prima pagina overflow.
+uint32_t BTree::write_overflow_pages(const std::vector<uint8_t>& data) {
+    size_t offset = 0;
+    size_t remaining = data.size();
+    uint32_t first_page = 0;
+    uint32_t prev_page = 0;
+
+    while (remaining > 0) {
+        uint32_t page_num = pager_->allocate_page();
+        uint8_t* page = pager_->get_page(page_num);
+
+        if (first_page == 0)
+            first_page = page_num;
+
+        size_t chunk = remaining > OVERFLOW_PAGE_DATA ? OVERFLOW_PAGE_DATA : remaining;
+
+        w32(page, 0);        // next = 0 (temporaneo)
+        w32(page + 4, (uint32_t)chunk);
+        memcpy(page + 8, data.data() + offset, chunk);
+
+        if (prev_page != 0) {
+            // Aggancia la nuova pagina alla precedente
+            uint8_t* prev = pager_->get_page(prev_page);
+            w32(prev, page_num);
+        }
+
+        prev_page = page_num;
+        offset += chunk;
+        remaining -= chunk;
+    }
+
+    return first_page;
+}
+
+// Legge un valore da una catena di pagine overflow.
+void BTree::read_overflow_pages(uint32_t first_page, uint32_t total_size,
+                                std::vector<uint8_t>& out) {
+    out.clear();
+    out.reserve(total_size);
+
+    uint32_t page_num = first_page;
+    while (page_num != 0) {
+        uint8_t* page = pager_->get_page(page_num);
+        uint32_t next = r32(page);
+        uint32_t data_len = r32(page + 4);
+        out.insert(out.end(), page + 8, page + 8 + data_len);
+        page_num = next;
+    }
+}
+
+// Libera le pagine overflow associate a un valore.
+// NOTA: Pager non ha free_page(), quindi le pagine rimangono allocate
+// e lo spazio non viene riutilizzato. È un memory leak noto.
+void BTree::free_overflow_pages(uint32_t first_page) {
+    uint32_t page_num = first_page;
+    while (page_num != 0) {
+        uint8_t* page = pager_->get_page(page_num);
+        uint32_t next = r32(page);
+        // Le pagine overflow rimangono allocate (nessun free_page disponibile)
+        page_num = next;
+    }
 }
 
 // ── costruttore ─────────────────────────────────────────────────
@@ -278,6 +394,7 @@ bool BTree::find(const std::vector<uint8_t>& key,
 
 // Rimuove una chiave solo su alberi a foglia singola (nessun ribilanciamento).
 // Per alberi con più livelli restituisce false.
+// Libera le eventuali pagine overflow del valore rimosso.
 bool BTree::remove(const std::vector<uint8_t>& key) {
     uint8_t* page = pager_->get_page(root_page_num_);
     auto h = read_hdr(page);
@@ -286,9 +403,18 @@ bool BTree::remove(const std::vector<uint8_t>& key) {
     int idx = find_key_in_node(page, key);
     if (idx >= h.num_cells) return false;
 
-    std::vector<uint8_t> k, v;
-    read_leaf_cell(page, idx, k, v);
-    if (key_cmp(k, key) != 0) return false;
+    // Legge solo la chiave per verificare il match (evita overflow read)
+    uint16_t off = cell_offset(page, idx);
+    uint16_t ks = r16(page + off);
+    std::vector<uint8_t> cell_key(page + off + 2, page + off + 2 + ks);
+    if (key_cmp(cell_key, key) != 0) return false;
+
+    // Se la cella ha overflow pages, le libera
+    uint32_t vs = r32(page + off + 2 + ks);
+    if (vs == OVERFLOW_SENTINEL) {
+        uint32_t first_page = r32(page + off + 2 + ks + 8);
+        free_overflow_pages(first_page);
+    }
 
     // Sposta gli offset successivi verso l'inizio per chiudere il buco
     size_t hs = hdr_size(true);

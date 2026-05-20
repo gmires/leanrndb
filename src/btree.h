@@ -78,9 +78,11 @@ private:
     static size_t free_space(const uint8_t* page);
 
     // Legge una cella da un nodo foglia o interno
-    static void read_leaf_cell(const uint8_t* page, uint16_t idx,
-                               std::vector<uint8_t>& key,
-                               std::vector<uint8_t>& value);
+    void read_leaf_cell(const uint8_t* page, uint16_t idx,
+                        std::vector<uint8_t>& key,
+                        std::vector<uint8_t>& value);
+    static void read_leaf_key(const uint8_t* page, uint16_t idx,
+                              std::vector<uint8_t>& key);
     static void read_int_cell(const uint8_t* page, uint16_t idx,
                               std::vector<uint8_t>& key,
                               uint32_t& child_page);
@@ -102,6 +104,12 @@ private:
 
     static int key_cmp(const std::vector<uint8_t>& a,
                        const std::vector<uint8_t>& b);
+
+    // Overflow page helpers
+    uint32_t write_overflow_pages(const std::vector<uint8_t>& data);
+    void read_overflow_pages(uint32_t first_page, uint32_t total_size,
+                             std::vector<uint8_t>& out);
+    void free_overflow_pages(uint32_t first_page);
 
     Pager* pager_;
     uint32_t root_page_num_;

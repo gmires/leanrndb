@@ -61,11 +61,88 @@ Types: `INT`, `VARCHAR`, `TEXT`, `BOOL` (all stored as int or string internally)
 
 ## Key constraints
 
-- **B-tree `remove()` does NOT rebalance** — only works on single-leaf trees. Use with care.
-- **Cursor `next()` only scans within one leaf** — multi-page range scans not implemented.
-- **Catalog stored on page 0** — limited to 4 KB. Schema loss if exceeded.
-- **Tokenizer requires semicolon** to finalise statement in REPL.
-- **Tests use `tmpnam`** — builds warn; acceptable for test-only usage.
+- **`remove()` ora gestisce i merge**, con reindirizzamento delle celle del genitore e pulizia delle celle ridondanti. Tuttavia non c'è logica di redistribuzione — una foglia vuota assorbe un intero fratello, il che può fallire se il fratello non ci sta.
+- **`cell_area_end`** non viene aggiornato alla rimozione di una cella. Deve essere resettato a `PAGE_SIZE` prima di fare merge di celle in una pagina vuota (corretto nel codice di merge).
+- **Nodi interni genitori** dopo un merge: le celle adiacenti con lo stesso figlio vengono collassate, e l'ultima cella viene rimossa se il suo figlio è uguale a `right_child`. Questo evita che `scan_all` visiti la stessa foglia due volte.
+- **Catalog overflow**: supportato tramite la stessa catena di overflow usata dal B-tree.
+- **Cursor `next()` scansiona solo una foglia** — scansione multi-pagina non implementata.
+- **Il tokenizer richiede il punto e virgola** per finalizzare lo statement nel REPL.
+- **I test usano `tmpnam`** — il build avvisa; accettabile per test.
+
+---
+
+## Procedimenti (didattica)
+
+### Navigazione nei nodi interni: `find_child_page`
+
+Ogni cella di un nodo interno contiene:
+
+    cella[i] = (separatore S, puntatore_figlio)
+
+Il separatore `S` è la **prima chiave del fratello destro**. Quindi:
+- chiavi **strettamente minori** di `S` → vanno al **figlio sinistro** (cella[i])
+- chiavi **maggiori o uguali** a `S` → vanno al **prossimo figlio** (cella[i+1] o `right_child`)
+
+**Perché < e non ≤?** Se usassimo ≤, una chiave uguale al separatore finirebbe in *entrambi* i figli, creando duplicati in `scan_all` e facendo fallire le cancellazioni (una DELETE rimuoverebbe la stessa riga due volte).
+
+La funzione `find_child_page` implementa questa logica: cerca col `find_key_in_node` (binary search), poi scorre in avanti finché non trova un separatore strettamente maggiore della chiave.
+
+### Inserimento con split: la logica contraintuitiva
+
+Quando un figlio si split, succede questo:
+
+1. Il figlio originale viene DIVISO in due pagine: sinistra (originale) e destra (nuova)
+2. `child_split_key` = la prima chiave della metà destra
+3. `child_split_right` = il numero di pagina della metà destra
+
+Nel genitore dobbiamo fare DUE cose:
+
+1. **AGGIORNARE** i vecchi riferimenti: dove c'era scritto "figlio = pagina originale", ora scriviamo "figlio = child_split_right" (la metà destra)
+2. **INSERIRE** una nuova cella `(child_split_key, pagina_originale)` (la metà sinistra)
+
+È l'opposto di ciò che sembra intuitivo:
+- La **nuova** cella punta alla pagina **vecchia** (sinistra)
+- Il **vecchio** riferimento ora punta alla pagina **nuova** (destra)
+
+### Merge di foglie vuote
+
+Quando una foglia resta senza celle (`num_cells == 0`), invece di lasciarla vuota, assorbiamo le celle del fratello:
+
+1. Resettiamo `cell_area_end = PAGE_SIZE` (fondamentale! vedi sotto)
+2. Copiamo TUTTE le celle del fratello nella pagina vuota via `insert_into_leaf`
+3. Aggiorniamo i puntatori ai fratelli (destra e sinistra)
+4. Liberiamo la pagina del fratello
+5. Restituiamo al genitore: `freed_page = fratello`, `survivor_page = noi`
+
+**Problema critico:** la funzione che rimuove una cella (`remove_cell_from_leaf`) NON aggiorna `cell_area_end`. Dopo molte cancellazioni, `cell_area_end` rimane al punto più basso raggiunto durante gli inserimenti. Se facciamo un merge senza resettarlo, `insert_into_leaf` usa quel valore stantio per posizionare le nuove celle, scrivendole in mezzo alla pagina e corrompendo l'header. Soluzione: resettare `cell_area_end = PAGE_SIZE` prima di iniziare il merge.
+
+### Pulizia del genitore dopo un merge
+
+Dopo un merge, il genitore ha ricevuto `freed_page = X` e `survivor_page = Y`. Aggiorna tutti i puntatori da X a Y. Ma ora potremmo avere:
+
+    cella[0] = (sep=58, figlio=Y)
+    cella[1] = (sep=115, figlio=Y)   ← appena aggiornato
+
+Entrambe le celle puntano allo stesso figlio Y. `scan_all` visiterebbe Y **due volte**, producendo duplicati. La soluzione: tra celle adiacenti con lo stesso figlio, teniamo solo l'**ultima** (quella col separatore più alto).
+
+Inoltre, se dopo l'aggiornamento anche `right_child == Y` (stesso valore dell'ultima cella), anche quella cella è ridondante: tutte le chiavi vanno a Y sia via cella che via `right_child`. Anche in questo caso la rimuoviamo.
+
+### Split di foglie
+
+Quando una foglia non ha spazio per una nuova cella:
+
+1. Raccogliamo tutte le celle esistenti + la nuova
+2. Le dividiamo a metà: le prime metà nella pagina sinistra (originale), le seconde nella pagina destra (nuova)
+3. Colleghiamo le due pagine come fratelli (left_sibling / right_sibling)
+4. Restituiamo al genitore: `split_key` = prima chiave della metà destra, `split_right_child` = pagina della metà destra
+
+Il genitore poi inserirà `split_key` come separatore (vedi "Inserimento con split" sopra).
+
+### Riduzione dell'altezza
+
+Se dopo una rimozione la radice è un nodo interno con 0 celle, l'albero viene appiattito: la nuova radice diventa `right_child`. Questo succede automaticamente in `BTree::remove()` e mantiene l'albero bilanciato.
+
+---
 
 ## Roadmap: da REPL a server di rete
 

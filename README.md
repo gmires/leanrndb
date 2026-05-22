@@ -114,8 +114,13 @@ Lo split della radice crea un **nuovo livello**: la vecchia radice diventa
 figlia sinistra, una nuova pagina diventa figlia destra, e una nuova radice
 interna le collega.
 
-**`remove(chiave)`**: solo su alberi a foglia singola (nessun ribilanciamento).
-Per database semplici va bene; in produzione servirebbe la fusione di nodi.
+**`remove(chiave)`**: come find, ma quando arriva alla foglia rimuove la cella.
+Se la foglia rimane **vuota**, fonde le celle del fratello nella pagina vuota
+(**merge**) e libera la pagina del fratello. Il genitore viene aggiornato
+per riflettere la nuova struttura. Se durante l'aggiornamento nascono celle
+ridondanti (due celle adiacenti che puntano allo stesso figlio), vengono
+compattate. Se la radice rimane senza celle, viene rimossa e il suo unico
+figlio diventa la nuova radice (**riduzione dell'altezza**). O( log N ).
 
 **`scan_all(callback)`**: visita ricorsivamente tutte le foglie in ordine
 (DFS: prima tutti i figli del primo separatore, poi del secondo, ecc.).
@@ -130,6 +135,71 @@ Un B-tree è l'ideale per database perché:
 
 > SQLite, PostgreSQL, MySQL (InnoDB) usano tutti B-tree (o B+tree)
 > come struttura di storage principale.
+
+### Overflow pages
+
+Quando una riga è troppo grande per stare in una pagina 4 KB, il suo valore
+viene memorizzato in una **catena di pagine overflow**.
+
+#### Soglia
+
+Un valore è salvato inline se e solo se:
+
+    2 + key.size() + 4 + value.size() ≤ 4081
+
+(~4075 byte per una chiave di 8 byte). Oltre questa soglia, scatta l'overflow.
+
+#### Formato cella con overflow
+
+Invece del solito `[value_len][value]`, la cella foglia contiene:
+
+    [2 key_len][key][4 0xFFFFFFFF][4 total_size][4 first_page]
+
+| Campo | Significato |
+|---|---|
+| `0xFFFFFFFF` | **Sentinella** — segnala che è overflow |
+| `total_size` | Dimensione totale del valore originale |
+| `first_page` | Numero della prima pagina della catena overflow |
+
+#### Formato pagina overflow
+
+Ogni pagina overflow è un blocco 4 KB con questa struttura:
+
+    [4 next_page][4 data_len][4088 data]
+
+| Campo | Significato |
+|---|---|
+| `next_page` | Pagina successiva nella catena (0 = fine) |
+| `data_len` | Quanti byte di dati utili in questa pagina |
+| `data` | I dati veri e propri (fino a 4088 byte) |
+
+#### Catena di pagine
+
+Un valore grande viene suddiviso in blocchi da 4088 byte. Ogni blocco
+occupa una pagina overflow. Le pagine sono collegate in una lista
+concatenata unidirezionale tramite il campo `next_page`:
+
+```
+┌──────────┐    next_page ┌──────────┐    next_page ┌──────────┐
+│ Pagina 7 ├─────────────►│ Pagina 12├─────────────►│ Pagina 3 │
+│ data_len │              │ data_len │              │ data_len │
+│ = 3000   │              │ = 2000   │              │ = 500    │
+└──────────┘              └──────────┘              └──────────┘
+                                                       next_page = 0
+```
+
+#### Ottimizzazione binary search
+
+La funzione `read_leaf_key()` legge solo la chiave, NON il valore.
+Durante `find_key_in_node()`, anche per celle overflow, viene letta
+solo la chiave — la catena overflow viene seguita solo quando serve
+il valore (in `read_leaf_cell()`).
+
+#### Trasparenza
+
+Le funzioni `insert`, `find`, `remove` e `scan_all` gestiscono
+l'overflow internamente. Il chiamante (Database/Executor) non vede
+differenza tra una cella inline e una overflow.
 
 ---
 
@@ -256,6 +326,35 @@ e ricostruisce i metadati. Quando chiudi, `save_catalog()` riscrive tutto.
 Il formato inizia con il magic number `0x4C45414E` ("LEAN" in ASCII).
 Se la pagina 0 non ha questo magic, il database è vuoto.
 
+#### Overflow del catalogo
+
+Se lo schema diventa troppo grande per la pagina 0 (4 KB), scatta
+l'overflow. La pagina 0 cambia formato:
+
+```
+Formato inline (schema ≤ 4 KB):
+  [4 MAGIC][4 num_tables][tables...]
+
+Formato overflow (schema > 4 KB):
+  [4 MAGIC][4 0xFFFFFFFF][4 total_size][4 first_page]
+  → i dati (tutto tranne MAGIC) sono su pagine overflow
+```
+
+I campi:
+
+| Offset | Campo | Significato |
+|---|---|---|
+| 0–3 | `MAGIC` | "LEAN" |
+| 4–7 | `0xFFFFFFFF` | **Sentinella** — segnala overflow |
+| 8–11 | `total_size` | Dimensione del payload (tutto tranne MAGIC) |
+| 12–15 | `first_page` | Prima pagina della catena overflow |
+
+Le pagine overflow del catalogo usano lo **stesso formato** delle
+overflow pages del B-tree: `[4 next_page][4 data_len][4088 data]`.
+
+La `load_catalog()` è **backward compatible**: se il campo 4–7 non è
+`0xFFFFFFFF`, assume il formato inline classico senza overflow.
+
 ### Indici
 
 `create_index()`:
@@ -350,15 +449,16 @@ t
 Questo database è **didattico**, non production-grade. Ecco cosa manca:
 
 | Funzionalità | Come sarebbe in un DB vero |
-|---|---|
-| DELETE non ribilancia il B-tree | Dopo molte cancellazioni, l'albero degenera |
+|---|---|---|
+| Merge senza redistribuzione | Una foglia assorbe l'intero fratello; può fallire se non ci sta |
 | Cursor.scan_one_leaf | Non attraversa i bordi tra foglie |
-| Catalogo su pagina 0 (max 4 KB) | Pagine overflow per cataloghi grandi |
+| Catalogo su pagina 0 (max 4 KB) | Overflow pages per cataloghi grandi (supportato ma non attivo) |
 | Nessun WAL / transazioni | Ogni operazione è atomica solo a livello di pagina |
 | Nessun recovery | Se il programma crasha, il file può corrompersi |
 | Nessun controllo vincoli | Primary key, NOT NULL, UNIQUE non forzati |
 | Nessun JOIN | Solo query su una tabella |
 | Stringhe tra apici | Escape limitato, no double quotes per identificatori |
+| Overflow page non liberate | Le pagine overflow orphanate non vengono riciclate |
 
 ---
 

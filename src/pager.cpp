@@ -1,4 +1,5 @@
 #include "pager.h"
+#include <cstring>
 
 // Apre il file in lettura+scrittura. Se non esiste, lo crea.
 // Poi carica in memoria tutte le pagine esistenti (ognuna 4 KB).
@@ -42,12 +43,27 @@ uint8_t* Pager::get_page(uint32_t page_num) {
 }
 
 // Alloca una nuova pagina (tutti zeri) e restituisce il suo numero.
-// Viene marcata come sporca perché la scriveremo al flush.
+// Riusa pagine libere se disponibili.
 uint32_t Pager::allocate_page() {
+    if (!free_pages_.empty()) {
+        uint32_t num = free_pages_.back();
+        free_pages_.pop_back();
+        // La pagina era stata azzerata da free_page(), la segniamo sporca
+        dirty_[num] = true;
+        return num;
+    }
     uint32_t num = (uint32_t)pages_.size();
     pages_.emplace_back(PAGE_SIZE, 0);
     dirty_.push_back(true);
     return num;
+}
+
+// Libera una pagina: azzera il buffer e la aggiunge alla lista libera.
+void Pager::free_page(uint32_t page_num) {
+    if (page_num >= pages_.size()) return;
+    memset(pages_[page_num].data(), 0, PAGE_SIZE);
+    dirty_[page_num] = true;
+    free_pages_.push_back(page_num);
 }
 
 // Se la pagina è sporca, la riscrive su disco nel punto giusto del file.

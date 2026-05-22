@@ -27,8 +27,10 @@ public:
 
     /** Restituisce un puntatore alla pagina numero `page_num` (0-based). */
     uint8_t* get_page(uint32_t page_num);
-    /** Alloca una nuova pagina (vuota) in coda al file e ne restituisce il numero. */
+    /** Alloca una nuova pagina (vuota) e ne restituisce il numero (riusa pagine libere se disponibili). */
     uint32_t allocate_page();
+    /** Libera una pagina (viene azzerata e riutilizzata da allocate_page). */
+    void free_page(uint32_t page_num);
     /** Scrive su disco la pagina `page_num` se è sporca. */
     void flush_page(uint32_t page_num);
     /** Scrive su disco tutte le pagine sporche. */
@@ -44,4 +46,5 @@ private:
     std::fstream file_;
     std::vector<std::vector<uint8_t>> pages_;
     std::vector<bool> dirty_;
+    std::vector<uint32_t> free_pages_;
 };

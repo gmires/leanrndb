@@ -14,6 +14,14 @@ static void w32_bytes(std::vector<uint8_t>& buf, uint32_t v) {
     buf.push_back((uint8_t)((v >> 24) & 0xFF));
 }
 
+// Scrive uint32_t little-endian in un buffer raw ad un dato puntatore
+static void w32_bytes_raw(uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xFF);
+    p[1] = (uint8_t)((v >> 8) & 0xFF);
+    p[2] = (uint8_t)((v >> 16) & 0xFF);
+    p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
+
 // Legge uint32_t little-endian da un buffer a un dato offset
 static uint32_t r32_at(const uint8_t* p, size_t off) {
     return (uint32_t)p[off] | ((uint32_t)p[off+1] << 8) |
@@ -84,26 +92,77 @@ BTree* Database::get_btree(uint32_t root_page) {
 }
 
 // ── serializzazione catalogo (pagina 0) ──────────────────────────
+//
+// Formato inline (backward compatible):
+//   [4 byte] MAGIC ("LEAN")
+//   [4 byte] num_tables
+//   per ogni tabella: [...]
+//
+// Formato overflow (quando data.size() > PAGE_SIZE - 8):
+//   [4 byte] MAGIC ("LEAN")
+//   [4 byte] 0xFFFFFFFF (OVERFLOW_SENTINEL)
+//   [4 byte] total_size (dimensione dei dati serializzati)
+//   [4 byte] first_page (prima pagina overflow)
+//
+// I dati su overflow pages hanno lo stesso formato inline:
+//   [4 byte] num_tables
+//   per ogni tabella: [...]
 
-/**
- * Salva tutti i metadati sulla pagina 0.
- *
- * Formato:
- *   [4 byte] MAGIC ("LEAN")
- *   [4 byte] num_tables
- *   per ogni tabella:
- *     [2 byte] len_nome + nome
- *     [4 byte] root_page
- *     [4 byte] next_rowid
- *     [2 byte] num_colonne
- *     per ogni colonna: [2 byte] len_nome + nome + [2 byte] len_tipo + tipo
- *     [2 byte] num_indici
- *     per ogni indice: [2 byte] len_nome + nome + [2 byte] len_col + col + [4 byte] root_page
- */
+static constexpr uint32_t CATALOG_OVERFLOW = 0xFFFFFFFF;
+static constexpr size_t OVERFLOW_PAGE_DATA = Pager::PAGE_SIZE - 8;
+
+// Scrive dati su una catena di pagine overflow. Restituisce la prima pagina.
+static uint32_t write_catalog_overflow(Pager& pager, const std::vector<uint8_t>& data) {
+    size_t offset = 0;
+    size_t remaining = data.size();
+    uint32_t first_page = 0;
+    uint32_t prev_page = 0;
+
+    while (remaining > 0) {
+        uint32_t page_num = pager.allocate_page();
+        uint8_t* page = pager.get_page(page_num);
+
+        if (first_page == 0) first_page = page_num;
+
+        size_t chunk = remaining > OVERFLOW_PAGE_DATA ? OVERFLOW_PAGE_DATA : remaining;
+        w32_bytes_raw(page, 0);        // next = 0 (temporaneo)
+        w32_bytes_raw(page + 4, (uint32_t)chunk);
+        memcpy(page + 8, data.data() + offset, chunk);
+
+        if (prev_page != 0) {
+            uint8_t* prev = pager.get_page(prev_page);
+            w32_bytes_raw(prev, page_num);
+        }
+
+        prev_page = page_num;
+        offset += chunk;
+        remaining -= chunk;
+    }
+    return first_page;
+}
+
+// Legge dati da una catena di pagine overflow.
+static std::vector<uint8_t> read_catalog_overflow(Pager& pager, uint32_t first_page,
+                                                    uint32_t total_size) {
+    std::vector<uint8_t> out;
+    out.reserve(total_size);
+
+    uint32_t page_num = first_page;
+    while (page_num != 0) {
+        uint8_t* page = pager.get_page(page_num);
+        uint32_t next = r32_at(page, 0);
+        uint32_t data_len = r32_at(page, 4);
+        out.insert(out.end(), page + 8, page + 8 + data_len);
+        page_num = next;
+    }
+    return out;
+}
+
 void Database::save_catalog() {
     uint8_t* page = pager_.get_page(HEADER_PAGE);
     memset(page, 0, Pager::PAGE_SIZE);
 
+    // Formato dati: [4 MAGIC][4 num_tables][tables...] (stesso di sempre)
     std::vector<uint8_t> data;
     w32_bytes(data, MAGIC);
 
@@ -134,40 +193,69 @@ void Database::save_catalog() {
         }
     }
 
-    if (data.size() > Pager::PAGE_SIZE) return; // overflow (non gestito)
-    memcpy(page, data.data(), data.size());
+    if (data.size() <= Pager::PAGE_SIZE) {
+        // Inline: copia tutto su page 0 (stesso formato di sempre)
+        memcpy(page, data.data(), data.size());
+    } else {
+        // Overflow: page 0 contiene solo MAGIC + indice overflow
+        // page[0-3] = MAGIC
+        // page[4-7] = CATALOG_OVERFLOW sentinel
+        // page[8-11] = total_size (intero data escluso MAGIC)
+        // page[12-15] = first_overflow_page
+        // I dati (esclusi i primi 4 byte MAGIC) vanno su overflow pages
+        memcpy(page, data.data(), 4);  // MAGIC
+        w32_bytes_raw(page + 4, CATALOG_OVERFLOW);
+        uint32_t payload_size = (uint32_t)(data.size() - 4);  // exclude MAGIC
+        w32_bytes_raw(page + 8, payload_size);
+        std::vector<uint8_t> payload(data.begin() + 4, data.end());
+        uint32_t first_page = write_catalog_overflow(pager_, payload);
+        w32_bytes_raw(page + 12, first_page);
+    }
     pager_.flush_page(HEADER_PAGE);
 }
 
-// Carica il catalogo dalla pagina 0. Se il MAGIC non corrisponde,
-// il database è nuovo e non ci sono tabelle.
 void Database::load_catalog() {
     uint8_t* page = pager_.get_page(HEADER_PAGE);
     uint32_t magic = r32_at(page, 0);
     if (magic != MAGIC) return;
 
-    size_t pos = 8;
+    uint32_t field4 = r32_at(page, 4);
+    std::vector<uint8_t> buf;
+
+    if (field4 == CATALOG_OVERFLOW) {
+        uint32_t payload_size = r32_at(page, 8);
+        uint32_t first_page = r32_at(page, 12);
+        buf = read_catalog_overflow(pager_, first_page, payload_size);
+    } else {
+        // Inline: field4 è num_tables, dati seguono da offset 4
+        // Ricostruisce buf = [4 num_tables][resto del catalogo]
+        buf.resize(Pager::PAGE_SIZE - 4);
+        memcpy(buf.data(), page + 4, Pager::PAGE_SIZE - 4);
+    }
+
+    // Parse buf: [4 num_tables][tables...]
+    size_t pos = 0;
     auto read_u16 = [&]() -> uint16_t {
-        uint16_t v = (uint16_t)page[pos] | ((uint16_t)page[pos+1] << 8);
+        uint16_t v = (uint16_t)buf[pos] | ((uint16_t)buf[pos+1] << 8);
         pos += 2;
         return v;
     };
     auto read_u32 = [&]() -> uint32_t {
-        uint32_t v = (uint32_t)page[pos] | ((uint32_t)page[pos+1] << 8) |
-                     ((uint32_t)page[pos+2] << 16) | ((uint32_t)page[pos+3] << 24);
+        uint32_t v = (uint32_t)buf[pos] | ((uint32_t)buf[pos+1] << 8) |
+                     ((uint32_t)buf[pos+2] << 16) | ((uint32_t)buf[pos+3] << 24);
         pos += 4;
         return v;
     };
     auto read_str = [&]() -> std::string {
         uint16_t len = read_u16();
-        std::string s((const char*)page + pos, len);
+        std::string s((const char*)buf.data() + pos, len);
         pos += len;
         return s;
     };
 
-    uint32_t num_tables = r32_at(page, 4);
+    uint32_t num_tables = read_u32();
     for (uint32_t t = 0; t < num_tables; t++) {
-        if (pos >= Pager::PAGE_SIZE) break;
+        if (pos >= buf.size()) break;
         TableInfo info;
         info.name = read_str();
         info.root_page = read_u32();

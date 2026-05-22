@@ -9,56 +9,18 @@
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
-            "environment": [],
+            "environment": [
+                {"name": "DEBUGINFOD_URLS", "value": ""}
+            ],
             "externalConsole": false,
             "MIMode": "gdb",
-            "miDebuggerPath": "/usr/bin/gdb",
+            "miDebuggerPath": "${workspaceFolder}/.vscode/gdb-wrapper.sh",
             "setupCommands": [
                 {
-                    "description": "Enable pretty printing for gdb",
-                    "text": "-enable-pretty-printing",
+                    "description": "Disable debuginfod before anything",
+                    "text": "set debuginfod enabled off",
                     "ignoreFailures": true
-                }
-            ],
-            "preLaunchTask": "Build"
-        },
-        {
-            "name": "Debug one-shot query",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build/leanrndb",
-            "args": [
-                "${workspaceFolder}/debug.db",
-                "SELECT * FROM t;"
-            ],
-            "stopAtEntry": false,
-            "cwd": "${workspaceFolder}",
-            "environment": [],
-            "externalConsole": false,
-            "MIMode": "gdb",
-            "miDebuggerPath": "/usr/bin/gdb",
-            "setupCommands": [
-                {
-                    "description": "Enable pretty printing for gdb",
-                    "text": "-enable-pretty-printing",
-                    "ignoreFailures": true
-                }
-            ],
-            "preLaunchTask": "Build"
-        },
-        {
-            "name": "Debug test_basic",
-            "type": "cppdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build/test_basic",
-            "args": [],
-            "stopAtEntry": false,
-            "cwd": "${workspaceFolder}",
-            "environment": [],
-            "externalConsole": false,
-            "MIMode": "gdb",
-            "miDebuggerPath": "/usr/bin/gdb",
-            "setupCommands": [
+                },
                 {
                     "description": "Enable pretty printing for gdb",
                     "text": "-enable-pretty-printing",
@@ -75,17 +37,83 @@
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
-            "environment": [],
+            "environment": [
+                {"name": "DEBUGINFOD_URLS", "value": ""}
+            ],
             "externalConsole": false,
             "MIMode": "gdb",
-            "miDebuggerPath": "/usr/bin/gdb",
+            "miDebuggerPath": "${workspaceFolder}/.vscode/gdb-wrapper.sh",
             "setupCommands": [
+                {
+                    "description": "Disable debuginfod before anything",
+                    "text": "set debuginfod enabled off",
+                    "ignoreFailures": true
+                },
                 {
                     "description": "Enable pretty printing for gdb",
                     "text": "-enable-pretty-printing",
                     "ignoreFailures": true
                 }
             ]
+        },
+        {
+            "name": "Debug one-shot query",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/leanrndb",
+            "args": [
+                "${workspaceFolder}/debug.db",
+                "SELECT * FROM t;"
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {"name": "DEBUGINFOD_URLS", "value": ""}
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "${workspaceFolder}/.vscode/gdb-wrapper.sh",
+            "setupCommands": [
+                {
+                    "description": "Disable debuginfod before anything",
+                    "text": "set debuginfod enabled off",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Enable pretty printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "Build"
+        },
+        {
+            "name": "Debug test_basic",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/test_basic",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {"name": "DEBUGINFOD_URLS", "value": ""}
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "${workspaceFolder}/.vscode/gdb-wrapper.sh",
+            "setupCommands": [
+                {
+                    "description": "Disable debuginfod before anything",
+                    "text": "set debuginfod enabled off",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Enable pretty printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "Build"
         }
     ]
 }
